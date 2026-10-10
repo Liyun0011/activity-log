@@ -157,15 +157,21 @@ jobs:
             ]
           }' > request.json
 
-          if curl -sS --fail-with-body https://models.github.ai/inference/chat/completions \
+          http=$(curl -sS -o response.json -w '%{http_code}' \
+               https://models.github.ai/inference/chat/completions \
+               -H "Accept: application/vnd.github+json" \
+               -H "X-GitHub-Api-Version: 2022-11-28" \
                -H "Authorization: Bearer $MODELS_TOKEN" \
                -H "Content-Type: application/json" \
-               -d @request.json -o response.json; then
-            jq -r '.choices[0].message.content' response.json > notes.md
+               -d @request.json) || http=000
+          echo "HTTP status: $http"
+
+          # 驗證回應：必須是 HTTP 200、合法 JSON、而且真的有內容，才採用 AI 的結果
+          if [ "$http" = "200" ] && jq -er '.choices[0].message.content' response.json > notes.md 2>/dev/null; then
             echo "status=ai" >> "$GITHUB_ENV"
           else
             # AI 失敗不擋 pipeline：退回原始 commit 清單，並標明沒有經過 AI
-            echo "::warning::AI call failed, falling back to raw commit list"
+            echo "::warning::AI call failed (HTTP $http): $(head -c 300 response.json 2>/dev/null | tr '\n' ' ')"
             { echo "_AI draft unavailable — raw commit list:_"; echo; cat commits_trim.txt; } > notes.md
             echo "status=fallback" >> "$GITHUB_ENV"
           fi

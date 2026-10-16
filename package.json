@@ -11,7 +11,11 @@
 	"scripts": {
 		"watch": "ncc build src/index.js --watch --license licenses.txt",
 		"build": "bun install && bunx ncc build src/index.js --license licenses.txt",
-		"lint:commit": "commitlint --last --verbose"
+		"lint:commit": "commitlint --last --verbose",
+		"test": "npm run test:unit && npm run test:integration",
+		"test:unit": "node --test test/unit/*.test.js",
+		"test:integration": "node --test test/integration/*.test.js",
+		"test:coverage": "node --test --experimental-test-coverage --test-coverage-include=src/** --test-coverage-lines=90 --test-coverage-branches=75 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=reports/unit-junit.xml --test-reporter=lcov --test-reporter-destination=reports/lcov.info test/unit/*.test.js"
 	},
 	"devDependencies": {
 		"@commitlint/cli": "^21.2.3",

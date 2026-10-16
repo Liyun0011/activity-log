@@ -1,3 +1,6 @@
+![CI](https://github.com/Liyun0011/activity-log/actions/workflows/pipeline.yml/badge.svg?branch=master)
+![Release](https://img.shields.io/github/v/release/Liyun0011/activity-log)
+
 <h1 align="center" id="title">Activity Log</h1>
 
 ![activity log](https://socialify.git.ci/TheDanniCraft/activity-log/image?forks=1&issues=1&language=1&logo=https%3A%2F%2Favatars.githubusercontent.com%2Fu%2F66677362&name=1&owner=1&pattern=Solid&pulls=1&stargazers=1&theme=Auto)

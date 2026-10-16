@@ -1,19 +1,29 @@
 # .github/workflows/pipeline.yml
-# A4: Deployment Pipeline  —  build → dev → staging → AI release notes → production (human gate)
+# A5: Automated Testing  —  build → unit tests (matrix + coverage gate) → integration tests (TEST_ENV=staging)
+#                          → dev → staging → smoke test on the staging release (TEST_ENV=prod)
+#                          → AI release notes → production (human gate)
+# 任何一個測試失敗，後面的 release 全部被跳過（skipped），並自動開 GitHub Issue
 
 name: CI/CD Deployment Pipeline
 
 on:
   push:
     branches: [master]          # activity-log 的預設分支是 master，不是 main
+  pull_request:
+    branches: [master]          # [A5] shift-left：PR 只跑 build + 測試，不會部署
   workflow_dispatch:            # 也可以在 Actions 頁面手動觸發
+    inputs:
+      force_fail:
+        description: "Make one unit test fail on purpose (demo: release must be skipped)"
+        type: boolean
+        default: false
 
 # 預設不給任何權限，每個 job 只拿自己需要的（least privilege）
 permissions: {}
 
-# 同一時間只跑一條 pipeline，避免兩次 push 搶同一個版本號
+# 同一時間只跑一條部署 pipeline；PR 用自己的 group，不會卡住部署
 concurrency:
-  group: deployment-pipeline
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref) || 'deployment-pipeline' }}
   cancel-in-progress: false
 
 jobs:
@@ -69,9 +79,96 @@ jobs:
           name: build-artifact
           path: build.zip
 
-  # ───────────────────────────── 2. Dev ─────────────────────────────
-  deploy-dev:
+  # ─────────────────── 2a. Unit tests（matrix：Node 20 / 22 / 24）───────────────────
+  test-unit:
     needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false            # 一個版本失敗，其他版本還是跑完，才看得出是哪個版本壞
+      matrix:
+        node: [20, 22, 24]
+    env:
+      FORCE_FAIL: ${{ inputs.force_fail }}   # 手動觸發時勾選，就會故意失敗（截圖用）
+      COVERAGE_NODE: 22                      # 只在 Node 22 量 coverage，避免重複
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Run unit tests (Node ${{ matrix.node }})
+        if: ${{ matrix.node != fromJSON(env.COVERAGE_NODE) }}
+        run: npm run test:unit
+
+      # [O #1] coverage report + [O #2] coverage gate：
+      # lines < 90% 或 branches < 75% → 這個 job 失敗 → 後面全部不會 release
+      - name: Run unit tests with coverage gate (Node ${{ matrix.node }})
+        if: ${{ matrix.node == fromJSON(env.COVERAGE_NODE) }}
+        run: |
+          mkdir -p reports
+          set -o pipefail
+          npm run test:coverage | tee reports/unit-output.txt
+
+      # [O #3] 測試報告：coverage 表格寫進 run 的 Summary 頁面
+      - name: Publish coverage summary
+        if: ${{ always() && matrix.node == fromJSON(env.COVERAGE_NODE) }}
+        run: |
+          {
+            echo "## 🧪 Unit tests — coverage (Node ${{ matrix.node }})"
+            echo "Gate: lines ≥ 90%, branches ≥ 75%"
+            echo '```'
+            sed -n '/start of coverage report/,/end of coverage report/p' reports/unit-output.txt | sed 's/^ℹ //'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # [O #3] JUnit XML + lcov 上傳成 artifact，可以下載下來看
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && matrix.node == fromJSON(env.COVERAGE_NODE) }}
+        with:
+          name: unit-test-reports
+          path: reports/
+          if-no-files-found: ignore
+
+  # ─────────────── 2b. Integration tests（TEST_ENV=staging，測 build 出來的 artifact）───────────────
+  test-integration:
+    needs: [build, test-unit]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TEST_ENV: staging                                # 參數化：staging 設定檔（較寬鬆）
+      DIST_DIR: artifact/dist                          # 測的是 build job 產生的檔案，不是重新 build
+      TEST_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # 只用來讀公開活動，dry run 不會 push
+      TEST_GITHUB_USERNAME: ${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-artifact
+      - name: Unpack build artifact
+        run: unzip -q build.zip -d artifact && ls -la artifact/dist
+      - name: Run integration tests (TEST_ENV=${{ env.TEST_ENV }})
+        run: |
+          mkdir -p reports
+          node --test --test-reporter=spec --test-reporter-destination=stdout \
+               --test-reporter=junit --test-reporter-destination=reports/integration-junit.xml \
+               test/integration/*.test.js
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: integration-test-reports
+          path: reports/
+          if-no-files-found: ignore
+
+  # ───────────────────────────── 3. Dev ─────────────────────────────
+  deploy-dev:
+    needs: [build, test-integration]           # [A5] 測試全部通過才會 release
+    if: github.event_name != 'pull_request'     # PR 只測試，不部署
     runs-on: ubuntu-latest
     environment: dev
     permissions:
@@ -92,13 +189,15 @@ jobs:
         if: failure()
         run: gh release delete "$TAG" --cleanup-tag -y || true
 
-  # ───────────────────────────── 3. Staging ─────────────────────────────
+  # ───────────────────────────── 4. Staging ─────────────────────────────
   deploy-staging:
     needs: [build, deploy-dev]
     runs-on: ubuntu-latest
     environment: staging
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.publish.outputs.tag }}   # [A5] 把實際 tag 傳給 smoke test
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
@@ -109,14 +208,67 @@ jobs:
         with:
           name: build-artifact     # 和 dev 用同一個 artifact，只有 tag 和說明不同
       - name: Release staging build
-        run: gh release create "$TAG" build.zip --title "Staging $TAG" --notes "$NOTE" --target "$GITHUB_SHA" --prerelease
+        id: publish
+        run: |
+          gh release create "$TAG" build.zip --title "Staging $TAG" --notes "$NOTE" --target "$GITHUB_SHA" --prerelease
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - name: Rollback failed release
         if: failure()
         run: gh release delete "$TAG" --cleanup-tag -y || true
 
-  # ─────────────── 4. AI agent：草擬 release notes（只讀、不能部署）───────────────
-  release-notes:
+  # ─────────── 5. Smoke test：把剛發布的 staging release 下載下來，用 prod 設定檔再測一次 ───────────
+  smoke-staging:
     needs: [build, deploy-staging]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      STAGING_TAG: ${{ needs.deploy-staging.outputs.tag }}
+      TEST_ENV: prod                                   # 參數化：prod 設定檔（最嚴格，一定要連到真的 API）
+      DIST_DIR: released/dist
+      TEST_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TEST_GITHUB_USERNAME: ${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Download the published staging release
+        run: |
+          gh release download "$STAGING_TAG" --pattern build.zip
+          unzip -q build.zip -d released
+      - name: Smoke test released build (TEST_ENV=${{ env.TEST_ENV }})
+        run: npm run test:integration
+
+  # ─────────── 7. 任何測試失敗 → 自動開（或更新）GitHub Issue ───────────
+  report-failure:
+    needs: [test-unit, test-integration, smoke-staging]
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      RESULTS: "unit=${{ needs.test-unit.result }}, integration=${{ needs.test-integration.result }}, smoke=${{ needs.smoke-staging.result }}"
+    steps:
+      - name: Open or update the CI failure issue
+        run: |
+          gh label create ci-failure --color B60205 --description "Automated test failure" --force
+          body="Tests failed on \`${GITHUB_SHA::7}\` (${GITHUB_REF_NAME}). Results: ${RESULTS}. Release was skipped. Run: ${RUN_URL}"
+          existing=$(gh issue list --label ci-failure --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "❌ CI tests failing on ${GITHUB_REF_NAME}" --label ci-failure --body "$body"
+          fi
+
+  # ─────────────── 6. AI agent：草擬 release notes（只讀、不能部署）───────────────
+  release-notes:
+    needs: [build, smoke-staging]          # [A5] smoke test 通過才進行
     runs-on: ubuntu-latest
     environment: ai-agent          # COPILOT_TOKEN 只存在這個 environment 的 secret 裡
     permissions:
@@ -193,9 +345,9 @@ jobs:
           name: release-notes
           path: notes.md
 
-  # ───────────── 5. Production（Required reviewers 人工核准）─────────────
+  # ───────────── 8. Production（Required reviewers 人工核准）─────────────
   deploy-production:
-    needs: [build, deploy-staging, release-notes]
+    needs: [build, smoke-staging, release-notes]
     runs-on: ubuntu-latest
     environment: production        # 這裡會停下來等 reviewer 按 Approve
     permissions:

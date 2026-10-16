@@ -140,7 +140,7 @@ jobs:
     env:
       TEST_ENV: staging                                # 參數化：staging 設定檔（較寬鬆）
       DIST_DIR: artifact/dist                          # 測的是 build job 產生的檔案，不是重新 build
-      secrets.ACTIVITY_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # 只用來讀公開活動，dry run 不會 push
+      TEST_GITHUB_TOKEN: ${{ secrets.ACTIVITY_TOKEN }}  # 要用個人 PAT：GITHUB_TOKEN 不能呼叫 /user/starred；dry run 不會 push
       TEST_GITHUB_USERNAME: ${{ github.repository_owner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -228,7 +228,7 @@ jobs:
       STAGING_TAG: ${{ needs.deploy-staging.outputs.tag }}
       TEST_ENV: prod                                   # 參數化：prod 設定檔（最嚴格，一定要連到真的 API）
       DIST_DIR: released/dist
-      secrets.ACTIVITY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TEST_GITHUB_TOKEN: ${{ secrets.ACTIVITY_TOKEN }}
       TEST_GITHUB_USERNAME: ${{ github.repository_owner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
